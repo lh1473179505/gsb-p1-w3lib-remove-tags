@@ -220,6 +220,10 @@ class TestRemoveTags:
             == "<b>not will removed</b>i will removed"
         )
 
+    def test_which_ones_and_keep_are_mutually_exclusive(self) -> None:
+        with pytest.raises(ValueError, match="Cannot use both which_ones and keep"):
+            remove_tags("<p>text</p>", which_ones=("p",), keep=("p",))
+
     def test_remove_tags_with_attributes(self):
         # text with tags and attributes
         assert remove_tags('<p align="center" class="one">texty</p>') == "texty"
@@ -255,13 +259,56 @@ class TestRemoveTags:
             == ""
         )
 
-    @pytest.mark.xfail(
-        reason="the tag scan stops at a raw < or > inside a quoted attribute value",
-        strict=True,
-    )
     @pytest.mark.parametrize("quote", ["<", ">"])
     def test_lt_gt_in_quoted_attribute_value(self, quote: str) -> None:
         assert remove_tags(f'<p class="a{quote}b">txt</p>', which_ones=("p",)) == "txt"
+
+    def test_mixed_quoted_attributes_on_all_paths(self) -> None:
+        mixed = (
+            '<div>x</div><a title="p>q">t</a>'
+            "<b data-json='{\"m<n\":1}'>u</b><p>v</p>"
+        )
+
+        assert remove_tags(mixed) == "xtuv"
+        assert (
+            remove_tags(mixed, which_ones=("a", "b")) == "<div>x</div>tu<p>v</p>"
+        )
+        assert remove_tags(mixed, keep=("p",)) == "xtu<p>v</p>"
+
+    @pytest.mark.parametrize(
+        ("encoding", "raw"),
+        [
+            ("latin-1", b'<a title="\xe9>q">t</a><p>v</p>'),
+            ("cp1252", b'<a title="\x93>q">t</a><p>v</p>'),
+        ],
+    )
+    def test_quoted_attributes_from_bytes(self, encoding: str, raw: bytes) -> None:
+        assert remove_tags(raw, encoding=encoding) == "tv"
+        assert remove_tags(raw, which_ones=("a",), encoding=encoding) == "t<p>v</p>"
+        assert remove_tags(raw, keep=("p",), encoding=encoding) == "t<p>v</p>"
+
+    @pytest.mark.parametrize(
+        "broken",
+        [
+            '<a b=c"d>keep</a>',
+            '<a b=c=d"e>keep</a>',
+            '<a b="x"="y>keep</a>',
+        ],
+    )
+    def test_quote_in_unquoted_attribute_does_not_start_a_value(
+        self, broken: str
+    ) -> None:
+        # The quote is part of the unquoted value, so the following ">" still
+        # closes this opening tag and its text content must remain visible.
+        assert remove_tags(broken) == "keep"
+        assert remove_tags(broken, which_ones=("a",)) == "keep"
+        assert remove_tags(broken, keep=("p",)) == "keep"
+
+    def test_unclosed_quoted_attribute_does_not_close_the_tag(self) -> None:
+        broken = '<a title="broken>keep</a>'
+        assert remove_tags(broken) == broken
+        assert remove_tags(broken, which_ones=("a",)) == broken
+        assert remove_tags(broken, keep=("p",)) == broken
 
     @pytest.mark.parametrize(
         "evil",
@@ -274,6 +321,27 @@ class TestRemoveTags:
         start = time.process_time()
         assert remove_tags(evil) == evil
         assert remove_tags(evil + "<b>x</b>") == evil + "x"
+        assert time.process_time() - start < 2
+
+    @pytest.mark.parametrize(
+        "evil",
+        [
+            pytest.param(
+                '<a title="' + "x>" * 100_000, id="unclosed-double-quote"
+            ),
+            pytest.param(
+                "<a title='" + "x>" * 100_000, id="unclosed-single-quote"
+            ),
+            pytest.param(
+                '<a ' + 'title="' * 100_000, id="many-unmatched-quotes"
+            ),
+        ],
+    )
+    def test_remove_tags_unclosed_quoted_attribute_is_linear(
+        self, evil: str
+    ) -> None:
+        start = time.process_time()
+        assert remove_tags(evil) == evil
         assert time.process_time() - start < 2
 
 

@@ -1,6 +1,15 @@
 w3lib release notes
 ===================
 
+Unreleased
+----------
+
+- :func:`~w3lib.html.remove_tags` now finds tag boundaries with a linear-time
+  scanner that understands quoted attribute values. The default,
+  ``which_ones`` and ``keep`` modes share those boundaries, so ``<`` and
+  ``>`` inside quoted attributes no longer leak attribute fragments into the
+  output, including for bytes decoded with an explicit encoding.
+
 2.4.1 (2026-03-20)
 ------------------
 

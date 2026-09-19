@@ -14,7 +14,7 @@ from w3lib._util import _scannable, iter_tag_attributes, to_unicode
 from w3lib.url import safe_url_string
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Iterator
 
 
 # Character references are ASCII digits only; \d would also match the Unicode
@@ -58,18 +58,9 @@ _meta_refresh_content_re = re.compile(
 
 _CDATA_START = "<![CDATA["
 _CDATA_END = "]]>"
-_tags_re = re.compile(
-    r"""
-    </?             # opening angle bracket, optional slash for a closing tag
-    ([^ <>/]+)      # tag name (captured): a run of non-space, non-bracket chars,
-    (?![^ <>/])     # pinned to its maximal length by this lookahead so it can't
-                    # overlap the run below and backtrack quadratically on an
-                    # unterminated tag (a "<" with a long run and no ">")
-    [^<>]*          # the rest of the tag: attributes, whitespace, etc.
-    >               # closing angle bracket
-    """,
-    re.IGNORECASE | re.VERBOSE,
-)
+# Tag-name delimiters kept compatible with the previous tag pattern.  Literal
+# whitespace other than " " is not a delimiter there.
+_TAG_NAME_DELIMITERS = frozenset(" <>/")
 _meta_re = re.compile("<meta", re.IGNORECASE | re.ASCII)
 
 
@@ -228,14 +219,94 @@ def remove_comments(text: str | bytes, encoding: str | None = None) -> str:
     return _REMOVECOMMENTS_RE.sub("", utext)
 
 
-def _remove_tag(
-    m: re.Match[str], which_ones: set[str] | tuple[()], keep: set[str] | tuple[()]
-) -> str:
-    tag = m.group(1).lower()
+def _iter_tags(text: str) -> Iterator[tuple[int, int, str]]:
+    """Yield ``(start, end, tag_name)`` for each complete tag.
 
-    should_remove = tag in which_ones if which_ones else tag not in keep
+    Tag syntax is intentionally the pragmatic syntax accepted by
+    :func:`remove_tags`, not full HTML.  Quotes are only significant when they
+    start an attribute value, i.e. after an ``=`` and optional whitespace.  A
+    quote occurring inside an unquoted value therefore remains an ordinary
+    character.  The scanner moves forward through the input exactly once.
+    """
 
-    return "" if should_remove else m.group(0)
+    text_length = len(text)
+    position = 0
+
+    while True:
+        start = text.find("<", position)
+        if start == -1:
+            return
+
+        index = start + 1
+        if index < text_length and text[index] == "/":
+            index += 1
+
+        name_start = index
+        while index < text_length and text[index] not in _TAG_NAME_DELIMITERS:
+            index += 1
+
+        if index == name_start:
+            position = start + 1
+            continue
+
+        # A raw "<" outside a quoted value ends the attempted opening tag.
+        # Start again there, where a separate tag may begin.
+        if index < text_length and text[index] == "<":
+            position = index
+            continue
+
+        tag_name = text[name_start:index].lower()
+        quote = ""
+        attribute_name_seen = False
+        after_equals = False
+        unquoted_value = False
+
+        while index < text_length:
+            char = text[index]
+
+            if quote:
+                if char == quote:
+                    quote = ""
+                    attribute_name_seen = False
+            elif char == ">":
+                yield start, index + 1, tag_name
+                position = index + 1
+                break
+            elif char == "<":
+                position = index
+                break
+            elif unquoted_value:
+                if char in HTML5_WHITESPACE:
+                    unquoted_value = False
+                    attribute_name_seen = False
+            elif after_equals:
+                if char in ('"', "'"):
+                    quote = char
+                    after_equals = False
+                    attribute_name_seen = False
+                elif char not in HTML5_WHITESPACE:
+                    # This is the first character of an unquoted value.
+                    after_equals = False
+                    unquoted_value = True
+            elif char == "=":
+                if attribute_name_seen:
+                    after_equals = True
+                    attribute_name_seen = False
+                else:
+                    # A stray equals sign starts a malformed attribute name.
+                    attribute_name_seen = True
+            elif char in ('"', "'"):
+                # A quote that does not start a value is an ordinary character.
+                attribute_name_seen = True
+            elif char in HTML5_WHITESPACE:
+                # Keep attribute_name_seen so whitespace may surround "=".
+                pass
+            else:
+                attribute_name_seen = True
+
+            index += 1
+        else:
+            return
 
 
 def remove_tags(
@@ -290,14 +361,22 @@ def remove_tags(
     if which_ones and keep:
         raise ValueError("Cannot use both which_ones and keep")
 
-    return _tags_re.sub(
-        functools.partial(
-            _remove_tag,
-            which_ones={tag.lower() for tag in which_ones} if which_ones else (),
-            keep={tag.lower() for tag in keep} if keep else (),
-        ),
-        to_unicode(text, encoding),
-    )
+    which_ones_set = {tag.lower() for tag in which_ones} if which_ones else set()
+    keep_set = {tag.lower() for tag in keep} if keep else set()
+    utext = to_unicode(text, encoding)
+
+    chunks = []
+    position = 0
+    for start, end, tag_name in _iter_tags(utext):
+        should_remove = (
+            tag_name in which_ones_set if which_ones else tag_name not in keep_set
+        )
+        if should_remove:
+            chunks.append(utext[position:start])
+            position = end
+    chunks.append(utext[position:])
+
+    return "".join(chunks)
 
 
 @functools.lru_cache(maxsize=256)
