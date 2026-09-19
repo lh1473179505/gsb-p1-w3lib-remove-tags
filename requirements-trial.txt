@@ -1,0 +1,8 @@
+# Editable Git install with no remote (w3lib==2.4.1)
+colorama==0.4.6
+iniconfig==2.3.0
+packaging==26.3
+pluggy==1.6.0
+Pygments==2.21.0
+pytest==9.1.1
+tomlkit==0.15.1

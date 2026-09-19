@@ -17,3 +17,6 @@ coverage.xml
 .idea/
 .codspeed
 uv.lock
+
+# Local trial environment
+.venv/
