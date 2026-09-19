@@ -58,18 +58,6 @@ _meta_refresh_content_re = re.compile(
 
 _CDATA_START = "<![CDATA["
 _CDATA_END = "]]>"
-_tags_re = re.compile(
-    r"""
-    </?             # opening angle bracket, optional slash for a closing tag
-    ([^ <>/]+)      # tag name (captured): a run of non-space, non-bracket chars,
-    (?![^ <>/])     # pinned to its maximal length by this lookahead so it can't
-                    # overlap the run below and backtrack quadratically on an
-                    # unterminated tag (a "<" with a long run and no ">")
-    [^<>]*          # the rest of the tag: attributes, whitespace, etc.
-    >               # closing angle bracket
-    """,
-    re.IGNORECASE | re.VERBOSE,
-)
 _meta_re = re.compile("<meta", re.IGNORECASE | re.ASCII)
 
 
@@ -228,14 +216,65 @@ def remove_comments(text: str | bytes, encoding: str | None = None) -> str:
     return _REMOVECOMMENTS_RE.sub("", utext)
 
 
-def _remove_tag(
-    m: re.Match[str], which_ones: set[str] | tuple[()], keep: set[str] | tuple[()]
-) -> str:
-    tag = m.group(1).lower()
+def _iter_tags(text: str) -> Iterable[tuple[int, int, str]]:
+    """Yield ``(start, end, name)`` for every tag in ``text``, in order.
 
-    should_remove = tag in which_ones if which_ones else tag not in keep
+    ``start`` is the index of the opening ``<`` and ``end`` is one past the
+    closing ``>``. ``<`` and ``>`` inside quoted attribute values do not
+    delimit the tag, so ``<a title="p>q">`` is one tag, not a tag plus the
+    ``q">`` fragment. A quote that is never closed is treated as a literal
+    attribute character, so a malformed tag such as ``<a b=c"d>`` still ends
+    at its ``>`` instead of swallowing the rest of the document.
 
-    return "" if should_remove else m.group(0)
+    The scan is a single left-to-right pass: quoted sections are skipped
+    with str.find, an unterminated quote can be searched for only once per
+    quoting style (after one fails, no such quote remains in the text), and
+    a ``<`` that does not start a tag is never reconsidered. It is therefore
+    linear in the length of ``text`` and cannot backtrack catastrophically.
+    """
+    n = len(text)
+    pos = 0
+    while True:
+        start = text.find("<", pos)
+        if start == -1:
+            return
+        i = start + 1
+        if i < n and text[i] == "/":  # closing tag
+            i += 1
+        name_start = i
+        while i < n and text[i] not in " <>/":
+            i += 1
+        if i == name_start:
+            # "<" not followed by a tag name: literal text.
+            pos = start + 1
+            continue
+        name_end = i
+        end = -1
+        while i < n:
+            char = text[i]
+            if char == ">":
+                end = i + 1
+                break
+            if char == "<":
+                # A new "<" outside quotes ends the tag candidate, as does
+                # the end of the text; neither produces a tag.
+                break
+            if char == '"' or char == "'":
+                close = text.find(char, i + 1)
+                if close == -1:
+                    # Unterminated quote: no such quote remains in the text,
+                    # so treat this one as a literal attribute character.
+                    i += 1
+                else:
+                    i = close + 1
+            else:
+                i += 1
+        if end == -1:
+            # Not a complete tag: the "<" is literal text.
+            pos = start + 1
+            continue
+        yield start, end, text[name_start:name_end]
+        pos = end
 
 
 def remove_tags(
@@ -290,14 +329,26 @@ def remove_tags(
     if which_ones and keep:
         raise ValueError("Cannot use both which_ones and keep")
 
-    return _tags_re.sub(
-        functools.partial(
-            _remove_tag,
-            which_ones={tag.lower() for tag in which_ones} if which_ones else (),
-            keep={tag.lower() for tag in keep} if keep else (),
-        ),
-        to_unicode(text, encoding),
-    )
+    utext = to_unicode(text, encoding)
+    which_ones_set = {tag.lower() for tag in which_ones} if which_ones else ()
+    keep_set = {tag.lower() for tag in keep} if keep else ()
+
+    # All three modes (default, which_ones, keep) share the same quote-aware
+    # tag boundaries from _iter_tags; they differ only in whether a matched
+    # tag is dropped or kept.
+    parts = []
+    append = parts.append
+    pos = 0
+    for start, end, name in _iter_tags(utext):
+        append(utext[pos:start])
+        should_remove = name.lower() in which_ones_set if which_ones_set else (
+            name.lower() not in keep_set
+        )
+        if not should_remove:
+            append(utext[start:end])
+        pos = end
+    append(utext[pos:])
+    return "".join(parts)
 
 
 @functools.lru_cache(maxsize=256)

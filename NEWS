@@ -1,6 +1,18 @@
 w3lib release notes
 ===================
 
+Unreleased
+----------
+
+- :func:`~w3lib.html.remove_tags` now locates tag boundaries with a
+  quote-aware, linear-time scan: a ``<`` or ``>`` inside a quoted attribute
+  value (e.g. ``<a title="p>q">``) no longer truncates the tag and leaks
+  attribute fragments into the extracted text. The default, ``which_ones``
+  and ``keep`` calls all share the same tag boundaries. Bytes inputs decoded
+  with a non-default ``encoding`` (such as ``latin-1`` or ``cp1252``) are
+  fixed as well. Malformed input with an unterminated quote (e.g.
+  ``<a b=c"d>keep</a>``) keeps ending the tag at its ``>``.
+
 2.4.1 (2026-03-20)
 ------------------
 

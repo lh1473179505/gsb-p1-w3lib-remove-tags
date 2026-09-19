@@ -255,25 +255,78 @@ class TestRemoveTags:
             == ""
         )
 
-    @pytest.mark.xfail(
-        reason="the tag scan stops at a raw < or > inside a quoted attribute value",
-        strict=True,
-    )
     @pytest.mark.parametrize("quote", ["<", ">"])
     def test_lt_gt_in_quoted_attribute_value(self, quote: str) -> None:
         assert remove_tags(f'<p class="a{quote}b">txt</p>', which_ones=("p",)) == "txt"
+
+    def test_mixed_quoted_lt_gt_in_one_document(self) -> None:
+        # Plain tags, a > inside a double-quoted attribute, a < inside a
+        # single-quoted attribute, and a data-* JSON-like attribute, all in
+        # one input: no attribute fragment may leak into the text.
+        doc = (
+            '<div>x</div><a title="p>q">t</a>'
+            "<b class='m<n'>u</b>"
+            '<p data-x=\'{"k": 1}\'>v</p>'
+        )
+        assert remove_tags(doc) == "xtuv"
+
+    def test_three_entry_points_share_tag_boundaries(self) -> None:
+        doc = (
+            '<div>x</div><a title="p>q">t</a>'
+            "<b class='m<n'>u</b><p>v</p>"
+        )
+        # (a) default: every tag is removed, text is intact
+        assert remove_tags(doc) == "xtuv"
+        # (b) which_ones: only a and b are removed, with the same boundaries
+        assert remove_tags(doc, which_ones=("a", "b")) == (
+            "<div>x</div>tu<p>v</p>"
+        )
+        # (c) keep: everything but p is removed, with the same boundaries
+        assert remove_tags(doc, keep=("p",)) == "xtu<p>v</p>"
+
+    def test_which_ones_and_keep_together_rejected(self) -> None:
+        doc = '<a title="p>q">t</a>'
+        with pytest.raises(ValueError):
+            remove_tags(doc, which_ones=("a",), keep=("p",))
+
+    def test_quoted_lt_gt_bytes_with_encoding(self) -> None:
+        doc = '<div>x</div><a title="p>q">t</a><b class=\'m<n\'>u</b>'.encode(
+            "latin-1"
+        )
+        assert remove_tags(doc, encoding="latin-1") == "xtu"
+        doc_cp1252 = '<a title="\u2019>x">w</a><p>z</p>'.encode("cp1252")
+        assert remove_tags(doc_cp1252, encoding="cp1252") == "wz"
+        assert remove_tags(doc_cp1252, which_ones=("a",), encoding="cp1252") == (
+            "w<p>z</p>"
+        )
+
+    def test_malformed_half_quote_does_not_swallow_text(self) -> None:
+        # An unterminated quote must not swallow the following text; the tag
+        # ends at its >, as it did before quote-awareness.
+        assert remove_tags('<a b=c"d>keep</a>') == "keep"
+        assert remove_tags('<a b=c"d>keep</a>', which_ones=("a",)) == "keep"
+        assert remove_tags('<a b=c"d>keep</a>', keep=("a",)) == (
+            '<a b=c"d>keep</a>'
+        )
 
     @pytest.mark.parametrize(
         "evil",
         [
             pytest.param("<a" * 30000, id="repeated-with-bracket"),
             pytest.param("<" + "a" * 400000, id="repeated-without-bracket"),
+            pytest.param('<a href="x' * 30000, id="repeated-unclosed-quote"),
+            pytest.param(
+                '<a title="' + "x" * 400000, id="single-unclosed-quote"
+            ),
+            pytest.param("<a " + '"x ' * 30000, id="many-lone-quotes"),
         ],
     )
     def test_remove_tags_no_catastrophic_backtracking(self, evil: str) -> None:
         start = time.process_time()
         assert remove_tags(evil) == evil
         assert remove_tags(evil + "<b>x</b>") == evil + "x"
+        assert remove_tags(evil, which_ones=("b",)) == evil
+        assert remove_tags(evil, keep=("b",)) == evil
         assert time.process_time() - start < 2
 
 

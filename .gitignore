@@ -20,3 +20,4 @@ uv.lock
 
 # Local trial environment
 .venv/
+.pytest_cache/
